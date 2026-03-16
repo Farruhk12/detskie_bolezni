@@ -1,9 +1,9 @@
 /**
  * Конфигурация приложения
  * GAS_API — URL вашего Google Apps Script (Развёртывание → Веб-приложение)
- * AI_API — базовый URL сервера с ИИ (пустая строка = тот же хост, при запуске через node server.js)
+ * GEMINI_API_KEY — опционально: ключ из Google AI Studio. Если указан — ИИ работает без GAS и без сервера.
  */
 window.CONFIG = {
-  GAS_API: 'https://script.google.com/macros/s/AKfycbzdUJPckbzpWXsG4GEE5i6slvy2OnnhUecf8IU4zs_rzL1Gg_vCZQGEgju14eZX8ti2uw/exec',
-  AI_API: ''  // Оставьте пустым при запуске через node server.js (сайт на том же хосте)
+  GAS_API: 'https://script.google.com/macros/s/AKfycbx7tfhmyJ1YwQRLXOOiFv-OWDtvPDCSRSiCX0fwAZu1JZSsWbSHkkDkUrdty2tahADmRg/exec',
+  GEMINI_API_KEY: ''  // Вставьте ключ из aistudio.google.com/apikey — ИИ работает без сервера и GAS
 };

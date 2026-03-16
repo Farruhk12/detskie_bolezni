@@ -42,6 +42,8 @@ function doPost(e) {
     if (a === 'saveExamQuestions') return out_(saveExamQuestions_(d));
     if (a === 'addTopic')          return out_(addTopic_(d));
     if (a === 'updateTopic')       return out_(updateTopic_(d));
+    if (a === 'aiChat')            return out_(aiChat_(d));
+    if (a === 'aiGrade')           return out_(aiGrade_(d));
     return out_({ error: 'Неизвестное действие' });
   } catch(err) { return out_({ error: String(err) }); }
 }
@@ -265,6 +267,63 @@ function saveExamQuestions_(d) {
     if (text) { sh.appendRow([now, String(d.topicId), title, text]); saved++; }
   });
   return { ok: true, saved };
+}
+
+/***** ИИ (Gemini) — работает без Node.js сервера *****/
+// Задать ключ: Проект → Свойства скрипта → GEMINI_API_KEY
+function callGemini_(systemPrompt, userPrompt, maxTokens, temp) {
+  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!key) throw new Error('GEMINI_API_KEY не задан. Добавьте в Свойства скрипта.');
+  const fullPrompt = systemPrompt + '\n\n' + userPrompt;
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + encodeURIComponent(key);
+  const res = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      contents: [{ parts: [{ text: fullPrompt }] }],
+      generationConfig: { temperature: temp || 0.2, maxOutputTokens: maxTokens || 700 }
+    }),
+    muteHttpExceptions: true
+  });
+  const text = res.getContentText();
+  if (res.getResponseCode() !== 200) throw new Error('Gemini: ' + text.slice(0, 200));
+  const j = JSON.parse(text);
+  const part = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0];
+  return String(part ? part.text : '').trim();
+}
+
+function aiChat_(d) {
+  try {
+    const sys = 'Ты — помощник для студентов педиатрии ТГМУ. Отвечай на русском, медицински точно.\n\nВАЖНО: Давай сразу суть — без вступлений. Запрещено: «Привет!», «Давай разберёмся», «Итак», «Хороший вопрос» и т.п.\nФормат: сразу по делу, 2–3 пунктами, без лишних слов.';
+    const user = 'Тема: ' + (d.topicTitle || '') + '\n\nКонтекст:\n' + (d.topicDesc || '') + '\n\n---\nВопрос: ' + (d.question || '');
+    const maxTok = d.channel === 'cards' ? 2000 : 700;
+    const answer = callGemini_(sys, user, maxTok, 0.2);
+    return { answer: answer };
+  } catch (e) {
+    return { error: String(e.message) };
+  }
+}
+
+function aiGrade_(d) {
+  try {
+    const answers = d.answers || [];
+    const hasPerTopic = answers.some(function(a) { return a.topicTitle; });
+    const qtext = hasPerTopic
+      ? answers.map(function(a, i) { return 'Вопрос ' + (i+1) + ' (тема: ' + (a.topicTitle || '—') + '): ' + a.question + '\nОтвет студента: ' + (a.answer || '(не ответил)'); }).join('\n\n')
+      : answers.map(function(a, i) { return 'Вопрос ' + (i+1) + ': ' + a.question + '\nОтвет студента: ' + (a.answer || '(не ответил)'); }).join('\n\n');
+    const topicCtx = hasPerTopic
+      ? 'Вопросы из разных тем курса. Оцени каждый ответ по контексту своей темы.'
+      : 'Тема: ' + (d.topicTitle || '') + '\n\nКонтекст:\n' + (String(d.topicDesc || '').slice(0, 4000));
+    const sys = 'Ты — строгий экзаменатор педиатрии. Оцени ответы как на реальном экзамене у будущих врачей. Будь максимально требовательным.\n\nКритерии оценок:\n- 5: Полный, точный ответ. Медицинская терминология, структура, все ключевые пункты. Без ошибок.\n- 4: В целом верно, но есть неточности или незначительные пропуски.\n- 3: Частичный ответ, пропущены важные аспекты, нет структуры.\n- 2: Поверхностно, общие фразы, много ошибок или неверная трактовка.\n- 1: Не ответил по существу, неверно, не по теме.\n\nНе завывай оценки. Неполный ответ — максимум 3. «Думаю», «наверное», общие фразы без конкретики — 2 или ниже. Отсутствие ответа — 1.\n\nДля каждого вопроса: оценка 1–5 и краткий, конкретный комментарий на русском (что упущено, что неверно).\nВерни ТОЛЬКО JSON: [{"grade":N,"comment":"..."}]. Количество элементов = количеству вопросов.';
+    const raw = callGemini_(sys, topicCtx + '\n\n' + qtext, 1500, 0.2);
+    var grades = [];
+    var m = raw.match(/\[[\s\S]*\]/);
+    if (m) { try { grades = JSON.parse(m[0]); } catch (e2) {} }
+    var avg = grades.length ? parseFloat((grades.reduce(function(s, g) { return s + (Number(g.grade) || 0); }, 0) / grades.length).toFixed(1)) : 0;
+    return { ok: true, grades: grades, avgGrade: avg };
+  } catch (e) {
+    return { ok: false, error: String(e.message) };
+  }
 }
 
 function parseFormBody_(str) {

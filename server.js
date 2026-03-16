@@ -56,14 +56,17 @@ const server = http.createServer(async (req, res) => {
     for await (const chunk of req) body += chunk;
     try {
       const d = JSON.parse(body || '{}');
-      const answer = await callAI(
-        `Ты — помощник для студентов педиатрии ТГМУ. Отвечай на русском, медицински точно.
+      const isCards = d.channel === 'cards';
+      const sysPrompt = isCards
+        ? 'Ты генерируешь учебные карточки. Отвечай ТОЛЬКО валидным JSON-массивом без markdown, без пояснений. Формат: [{"q":"Вопрос?","a":"Ответ."}]'
+        : `Ты — помощник для студентов педиатрии ТГМУ. Отвечай на русском, медицински точно.
 
 ВАЖНО: Давай сразу суть — без вступлений. Запрещено: «Привет!», «Давай разберёмся», «Итак», «Хороший вопрос» и т.п.
-Формат: сразу по делу, 2–3 пунктами, без лишних слов.`,
-        'Тема: ' + (d.topicTitle||'') + '\n\nКонтекст:\n' + (d.topicDesc||'') + '\n\n---\nВопрос: ' + (d.question||''),
-        d.channel === 'cards' ? 2000 : 700, 0.2
-      );
+Формат: сразу по делу, 2–3 пунктами, без лишних слов.`;
+      const userPrompt = isCards
+        ? 'Тема: ' + (d.topicTitle||'') + '\nОписание: ' + (d.topicDesc||'').slice(0, 3500) + '\n\n' + (d.question||'')
+        : 'Тема: ' + (d.topicTitle||'') + '\n\nКонтекст:\n' + (d.topicDesc||'') + '\n\n---\nВопрос: ' + (d.question||'');
+      const answer = await callAI(sysPrompt, userPrompt, isCards ? 2500 : 700, 0.2);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
       res.end(JSON.stringify({ answer }));
     } catch (e) {

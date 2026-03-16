@@ -4,7 +4,21 @@
 
 window.__t0 = performance.now();
 const API = (window.CONFIG && window.CONFIG.GAS_API) || '';
-function getAIBase() { return (window.CONFIG && window.CONFIG.AI_API) || ''; }
+const USE_LOCAL_SERVER = typeof location !== 'undefined' && location.origin && /^https?:\/\/localhost(:\d+)?$/.test(location.origin);
+
+async function aiPost(action, body) {
+  if (USE_LOCAL_SERVER) {
+    const path = action === 'aiChat' ? '/api/chat' : '/api/grade';
+    const reqBody = action === 'aiChat' ? { topicId: body.topicId, question: body.question, topicTitle: body.topicTitle, topicDesc: body.topicDesc, channel: body.channel } : body;
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
+    return r.json();
+  }
+  return fetch(API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, ...body })
+  }).then(r => r.json());
+}
 
 function mdToHtml(md) {
   if (!md) return '';
@@ -24,7 +38,7 @@ function el(tag, attrs, children) {
   [].concat(children||[]).filter(Boolean).forEach(c => node.append(c));
   return node;
 }
-const FETCH_TIMEOUT = 12000; // 12 сек
+const FETCH_TIMEOUT = 12000;
 async function apiFetch(url, opts = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT);
@@ -49,12 +63,11 @@ function hideSplash(delay=800) {
   const wait = Math.max(0, delay - (performance.now() - window.__t0));
   setTimeout(() => { sp.classList.add('hidden'); setTimeout(()=>{sp.style.display='none'},450); }, wait);
 }
-// Гарантированно скрыть splash через 6 сек, даже если загрузка зависла
 setTimeout(() => hideSplash(0), 6000);
 
 let TOPICS = [];
 let CURRENT = null;
-let ACTIVE_TAB = 'video';
+let ACTIVE_TAB = 'desc';
 let USER_PREFS = null;
 let EQ_CACHE = {};
 let CARDS=[], ORDER=[], ci=0, flipped=false;
@@ -62,9 +75,6 @@ const opened=new Set();
 let cardsFor=null;
 let ST = { questions:[], answers:[], step:0 };
 let EF = { questions:[], answers:[], step:0 };
-let TOPIC_SELECT_UI = null;
-let TOPIC_SELECT_BOUND = false;
-let TOPIC_SELECT_DOC_BOUND = false;
 
 const CE = {
   box: document.getElementById('cardBox'),
@@ -81,18 +91,32 @@ const CE = {
 function loadPrefs() { try { const v=localStorage.getItem('userPrefs'); return v?JSON.parse(v):null; } catch { return null; } }
 function savePrefs(p) { try { localStorage.setItem('userPrefs', JSON.stringify(p)); } catch {} }
 
+function updateTopicsUI() {
+  if (!USER_PREFS) return;
+  const facLabel = USER_PREFS.faculty === 'Педиатрический' ? 'Педиатрический факультет' : 'Лечебный факультет';
+  const sub = document.getElementById('topicsSubtitle');
+  if (sub) sub.textContent = USER_PREFS.course + ' курс · ' + facLabel;
+  const fac = document.getElementById('sidebarFaculty');
+  if (fac) fac.textContent = facLabel;
+}
+
 function renderHeaderMeta() {
   const wrap = document.getElementById('headerMeta');
   wrap.innerHTML = '';
-  if (!USER_PREFS) return;
+  const sidebarBtn = document.getElementById('sidebarChangePrefsBtn');
+  if (!USER_PREFS) {
+    if (sidebarBtn) sidebarBtn.style.display = 'none';
+    return;
+  }
   wrap.append(
     el('span', {class:'meta-badge'}, [USER_PREFS.course+' курс']),
-    el('span', {class:'meta-badge'}, [USER_PREFS.faculty]),
-    el('button', {class:'meta-change'}, ['Изменить'])
+    el('span', {class:'meta-badge'}, [USER_PREFS.faculty])
   );
-  wrap.querySelector('.meta-change').addEventListener('click', () => {
-    document.getElementById('onboarding').classList.remove('hidden');
-  });
+  if (sidebarBtn) {
+    sidebarBtn.style.display = '';
+    sidebarBtn.onclick = () => document.getElementById('onboarding').classList.remove('hidden');
+  }
+  updateTopicsUI();
 }
 
 (function initOnboarding() {
@@ -118,158 +142,63 @@ function renderHeaderMeta() {
   });
 })();
 
-function buildSelect(topics) {
-  const sel = document.getElementById('topicSelect');
-  if (!sel) return;
-  sel.innerHTML = '';
-  topics.forEach(t => sel.append(el('option', {value:t.id}, [t.title])));
-  if (!TOPIC_SELECT_BOUND) {
-    sel.addEventListener('change', () => {
-      renderTopicSelectUI();
-      selectTopic(sel.value);
-    });
-    TOPIC_SELECT_BOUND = true;
-  }
-  TOPIC_SELECT_UI = initTopicSelectUI(sel);
-  renderTopicSelectUI();
-}
+// ─── View management ───
 
-function initTopicSelectUI(sel) {
-  const wrap = sel.closest('.hero-pick-select-wrap');
-  if (!wrap) return null;
-  sel.classList.add('native-hidden');
-
-  let root = wrap.querySelector('.topic-dropdown');
-  let trigger = root ? root.querySelector('.topic-trigger') : null;
-  let label = trigger ? trigger.querySelector('.topic-trigger-label') : null;
-  let menu = root ? root.querySelector('.topic-menu') : null;
-
-  if (!root || !trigger || !label || !menu) {
-    root = el('div', {class:'topic-dropdown'});
-    trigger = el('button', {
-      type: 'button',
-      class: 'topic-trigger',
-      'aria-haspopup': 'listbox',
-      'aria-expanded': 'false'
-    });
-    label = el('span', {class:'topic-trigger-label'}, ['Выберите тему']);
-    const icon = el('span', {class:'topic-trigger-icon', 'aria-hidden': 'true'});
-    trigger.append(label, icon);
-    menu = el('div', {class:'topic-menu', role:'listbox'});
-    root.append(trigger, menu);
-    wrap.append(root);
-  }
-
-  if (!trigger.dataset.bound) {
-    trigger.addEventListener('click', () => {
-      if (!TOPIC_SELECT_UI) return;
-      if (TOPIC_SELECT_UI.root.classList.contains('open')) closeTopicMenu();
-      else openTopicMenu();
-    });
-
-    trigger.addEventListener('keydown', e => {
-      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        openTopicMenu();
-        const active = menu.querySelector('.topic-option.selected') || menu.querySelector('.topic-option');
-        if (active) active.focus();
-      }
-    });
-    trigger.dataset.bound = '1';
-  }
-
-  if (!TOPIC_SELECT_DOC_BOUND) {
-    document.addEventListener('click', e => {
-      if (!TOPIC_SELECT_UI || !TOPIC_SELECT_UI.root.contains(e.target)) closeTopicMenu();
-    });
-    document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') {
-        closeTopicMenu();
-        if (TOPIC_SELECT_UI && TOPIC_SELECT_UI.trigger) TOPIC_SELECT_UI.trigger.focus();
-      }
-    });
-    TOPIC_SELECT_DOC_BOUND = true;
-  }
-
-  return { sel, root, trigger, label, menu };
-}
-
-function openTopicMenu() {
-  if (!TOPIC_SELECT_UI) return;
-  TOPIC_SELECT_UI.root.classList.add('open');
-  TOPIC_SELECT_UI.trigger.setAttribute('aria-expanded', 'true');
-  const hero = TOPIC_SELECT_UI.root.closest('.hero-pick');
-  if (hero) hero.classList.add('topic-open');
-}
-
-function closeTopicMenu() {
-  if (!TOPIC_SELECT_UI) return;
-  TOPIC_SELECT_UI.root.classList.remove('open');
-  TOPIC_SELECT_UI.trigger.setAttribute('aria-expanded', 'false');
-  const hero = TOPIC_SELECT_UI.root.closest('.hero-pick');
-  if (hero) hero.classList.remove('topic-open');
-}
-
-function selectTopicFromMenu(value) {
-  if (!TOPIC_SELECT_UI || !TOPIC_SELECT_UI.sel) return;
-  const sel = TOPIC_SELECT_UI.sel;
-  const changed = sel.value !== value;
-  sel.value = value;
-  renderTopicSelectUI();
-  closeTopicMenu();
-  TOPIC_SELECT_UI.trigger.focus();
-  if (changed) sel.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
-function renderTopicSelectUI() {
-  if (!TOPIC_SELECT_UI || !TOPIC_SELECT_UI.sel) return;
-  const { sel, root, trigger, label, menu } = TOPIC_SELECT_UI;
-  const options = [...sel.options];
-
-  menu.innerHTML = '';
-  menu.removeAttribute('aria-activedescendant');
-  options.forEach((opt, i) => {
-    const active = opt.selected;
-    const btn = el('button', {
-      id: 'topic-opt-' + i,
-      type: 'button',
-      class: 'topic-option' + (active ? ' selected' : ''),
-      role: 'option',
-      'aria-selected': active ? 'true' : 'false',
-      'data-value': opt.value
-    }, [opt.textContent || '']);
-
-    btn.addEventListener('click', () => selectTopicFromMenu(opt.value));
-    btn.addEventListener('keydown', e => {
-      const items = [...menu.querySelectorAll('.topic-option')];
-      const idx = items.indexOf(btn);
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        const next = items[Math.min(idx + 1, items.length - 1)];
-        if (next) next.focus();
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (idx <= 0) trigger.focus();
-        else items[idx - 1].focus();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        closeTopicMenu();
-        trigger.focus();
-      } else if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        selectTopicFromMenu(opt.value);
-      }
-    });
-    menu.append(btn);
-    if (active) menu.setAttribute('aria-activedescendant', 'topic-opt-' + i);
+function switchView(view) {
+  ['topics', 'detail', 'exam'].forEach(v => {
+    const el = document.getElementById('view-' + v);
+    if (el) el.hidden = (v !== view);
   });
-
-  const selected = options.find(o => o.selected) || options[0];
-  label.textContent = selected ? selected.textContent : 'Выберите тему';
-  const disabled = !options.length;
-  root.classList.toggle('disabled', disabled);
-  trigger.disabled = disabled;
+  document.getElementById('nav-home').classList.toggle('active', view === 'topics');
+  document.getElementById('nav-exam').classList.toggle('active', view === 'exam');
 }
+
+document.getElementById('nav-home').addEventListener('click', () => switchView('topics'));
+document.getElementById('nav-exam').addEventListener('click', () => { switchView('exam'); resetEF(); });
+document.getElementById('backBtn').addEventListener('click', () => switchView('topics'));
+
+document.getElementById('changePrefsBtn').addEventListener('click', () => {
+  document.getElementById('onboarding').classList.remove('hidden');
+});
+
+// ─── Topic List ───
+
+function buildTopicList(topics) {
+  const list = document.getElementById('topicList');
+  list.innerHTML = '';
+  if (!topics.length) {
+    list.innerHTML = '<div class="empty" style="padding:1rem 0">По вашему курсу и факультету пока нет тем.</div>';
+    return;
+  }
+  topics.forEach((t, i) => {
+    const hasVideo   = !!(t.embed && t.embed.src);
+    const hasPathogen = !!(t.embedPathogen && t.embedPathogen.src);
+    const tags = [];
+    if (hasVideo)    tags.push('<span class="topic-tag topic-tag-video">Видео</span>');
+    if (hasPathogen) tags.push('<span class="topic-tag topic-tag-pathogen">Патогенез</span>');
+
+    const card = el('div', {class: 'topic-card', 'data-id': String(t.id)});
+    card.innerHTML =
+      '<span class="topic-num">' + (i + 1) + '</span>' +
+      '<div class="topic-card-content">' +
+        '<div class="topic-card-title">' + esc(t.title) + '</div>' +
+        (tags.length ? '<div class="topic-card-tags">' + tags.join('') + '</div>' : '') +
+      '</div>' +
+      '<svg class="topic-card-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>';
+
+    card.addEventListener('click', () => selectTopic(t.id));
+    list.append(card);
+  });
+}
+
+document.getElementById('topicSearch').addEventListener('input', function() {
+  const q = this.value.toLowerCase().trim();
+  document.querySelectorAll('.topic-card').forEach(card => {
+    const id = card.dataset.id;
+    const t = TOPICS.find(x => String(x.id) === id);
+    card.hidden = !!(q && t && !t.title.toLowerCase().includes(q));
+  });
+});
 
 async function loadTopics() {
   if (!USER_PREFS) return;
@@ -278,18 +207,83 @@ async function loadTopics() {
     const data = await apiFetch(url);
     TOPICS = data.topics || [];
     if (!TOPICS.length) {
-      TOPIC_SELECT_UI = null;
-      document.getElementById('block-select').innerHTML = '<div class="empty" style="font-size:15px">По вашему курсу и факультету пока нет тем.</div>';
+      document.getElementById('topicList').innerHTML = '<div class="empty" style="padding:1rem 0">По вашему курсу и факультету пока нет тем.</div>';
       return;
     }
-    buildSelect(TOPICS);
+    buildTopicList(TOPICS);
     const m = location.hash.match(/topic=([^&]+)/);
-    const initId = m ? decodeURIComponent(m[1]) : TOPICS[0].id;
-    document.getElementById('topicSelect').value = initId;
-    renderTopicSelectUI();
-    await selectTopic(initId);
-  } catch(err) { console.error(err); }
+    if (m) {
+      const initId = decodeURIComponent(m[1]);
+      await selectTopic(initId);
+    }
+  } catch(err) {
+    console.error(err);
+    document.getElementById('topicList').innerHTML = '<div class="empty" style="color:#ef4444;font-weight:600;padding:1rem 0">Не удалось загрузить темы. Проверьте интернет.</div>';
+  }
 }
+
+// ─── Content Tabs ───
+
+function showTab(tab) {
+  ACTIVE_TAB = tab;
+  document.querySelectorAll('.ctab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.ctab === tab);
+  });
+  const contentBlocks = ['desc', 'ai', 'cards', 'exam', 'selftest', 'social'];
+  contentBlocks.forEach(t => {
+    const el = document.getElementById('block-' + t);
+    if (el) el.hidden = (t !== tab);
+  });
+  if (tab === 'cards'    && CURRENT) ensureCards(CURRENT.id);
+  if (tab === 'exam'     && CURRENT) loadExamQ(CURRENT.id);
+  if (tab === 'selftest' && CURRENT) resetST();
+}
+
+document.querySelectorAll('.ctab').forEach(btn => {
+  btn.addEventListener('click', () => showTab(btn.dataset.ctab));
+});
+
+// ─── Sidebar toggle ───
+
+(function initSidebarToggle() {
+  const sidebar = document.getElementById('sidebar');
+  const toggle  = document.getElementById('sidebarToggle');
+  const overlay = document.getElementById('sidebarOverlay');
+  const STORAGE_KEY = 'sidebarHidden';
+  function isMobile() { return window.matchMedia('(max-width: 768px)').matches; }
+  function getHidden() {
+    try {
+      const v = localStorage.getItem(STORAGE_KEY);
+      if (v !== null) return v === '1';
+      return isMobile();
+    } catch { return isMobile(); }
+  }
+  function setHidden(v) { try { localStorage.setItem(STORAGE_KEY, v ? '1' : '0'); } catch {} }
+  function apply() {
+    const hidden = getHidden();
+    const mobile = isMobile();
+    sidebar.classList.toggle('sidebar-hidden', hidden && !mobile);
+    sidebar.classList.toggle('sidebar-visible', !hidden && mobile);
+    if (overlay) {
+      overlay.classList.toggle('visible', mobile && !hidden);
+      overlay.setAttribute('aria-hidden', (mobile && !hidden) ? 'false' : 'true');
+    }
+  }
+  function toggleSidebar() {
+    const mobile = isMobile();
+    setHidden(!getHidden());
+    apply();
+  }
+  if (toggle) toggle.addEventListener('click', toggleSidebar);
+  if (overlay) overlay.addEventListener('click', () => { if (isMobile()) { setHidden(true); apply(); } });
+  sidebar.querySelectorAll('.sidebar-link, .sidebar-admin').forEach(el => {
+    el.addEventListener('click', () => { if (isMobile()) { setHidden(true); apply(); } });
+  });
+  window.addEventListener('resize', apply);
+  apply();
+})();
+
+// ─── Video player ───
 
 function renderPlayer(embed) {
   const wrap = document.getElementById('player');
@@ -304,6 +298,23 @@ function renderPlayer(embed) {
   }
 }
 
+let ACTIVE_VIDEO_TAB = 'general';
+
+function switchVideoTab(tab) {
+  ACTIVE_VIDEO_TAB = tab;
+  document.querySelectorAll('.video-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.video === tab);
+  });
+  if (!CURRENT) return;
+  const embed = tab === 'pathogen' ? (CURRENT.embedPathogen || null) : (CURRENT.embed || null);
+  renderPlayer(embed);
+}
+
+document.getElementById('videoTabGeneral').addEventListener('click', ()=>switchVideoTab('general'));
+document.getElementById('videoTabPathogen').addEventListener('click', ()=>switchVideoTab('pathogen'));
+
+// ─── Comments & Likes ───
+
 async function loadComments(id) {
   const box = document.getElementById('comments');
   box.innerHTML = '<div class="empty">Загрузка…</div>';
@@ -312,7 +323,7 @@ async function loadComments(id) {
     box.innerHTML = '';
     if (!(d.comments||[]).length) { box.innerHTML='<div class="empty">Комментариев пока нет.</div>'; return; }
     (d.comments||[]).forEach(c => box.append(el('div',{class:'comment'},[el('div',{},[c.text]),el('small',{},[`${c.name||'Студент'} · ${fmtDt(c.ts)}`])])));
-  } catch { box.innerHTML='<div class="empty" style="color:#b91c1c">Ошибка загрузки.</div>'; }
+  } catch { box.innerHTML='<div class="empty" style="color:#ef4444">Ошибка загрузки.</div>'; }
 }
 
 async function refreshLikes(id) {
@@ -344,6 +355,8 @@ document.getElementById('commentForm').addEventListener('submit', async e => {
   try { const r=await fetch(API,{method:'POST',body:fd}); const j=await r.json(); msg.textContent=j.ok?'Комментарий добавлен ✔':'Ошибка: '+(j.error||''); if(j.ok){e.target.reset();await loadComments(CURRENT.id);} } catch { msg.textContent='Ошибка сети'; }
 });
 
+// ─── AI Chat ───
+
 function aiSetBusy(busy, msg) {
   const btn=document.getElementById('askBtn'); btn.disabled=!!busy; btn.classList.toggle('off',!!busy);
   document.getElementById('aiStatus').textContent=msg||(busy?'Готовим ответ…':'');
@@ -353,19 +366,13 @@ document.getElementById('aiForm').addEventListener('submit', async e => {
   e.preventDefault(); if (!CURRENT) return;
   const qEl=document.getElementById('aiQ'); const q=qEl.value.trim(); if(!q) return;
   aiSetBusy(true,'Формулируем ответ…');
-  const aiBase = getAIBase();
   try {
-    const r = await fetch(aiBase + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        topicId: CURRENT.id,
-        question: q,
-        topicTitle: CURRENT.title,
-        topicDesc: (CURRENT.description||'').replace(/<[^>]+>/g,'').slice(0,8000)
-      })
+    const j = await aiPost('aiChat', {
+      topicId: CURRENT.id,
+      question: q,
+      topicTitle: CURRENT.title,
+      topicDesc: (CURRENT.description||'').replace(/<[^>]+>/g,'').slice(0,8000)
     });
-    const j = await r.json();
     if (j.answer) {
       const box=document.getElementById('aiAnswer'); const body=document.getElementById('aiAnswerBody');
       body.innerHTML=mdToHtml(String(j.answer).trim()); box.hidden=false;
@@ -375,8 +382,8 @@ document.getElementById('aiForm').addEventListener('submit', async e => {
       fd.append('question',q); fd.append('answer',j.answer);
       try { await fetch(API,{method:'POST',body:fd}); } catch {}
       await loadQA(CURRENT.id);
-    } else aiSetBusy(false,'Ошибка: '+(j.error||'сервер ИИ недоступен. Запустите node server.js'));
-  } catch { aiSetBusy(false,'Ошибка сети. Убедитесь, что сервер запущен (node server.js).'); }
+    } else aiSetBusy(false,'Ошибка: '+(j.error||'ИИ недоступен'));
+  } catch { aiSetBusy(false,'Ошибка сети. Проверьте GEMINI_API_KEY в Google Apps Script.'); }
 });
 
 async function loadQA(id) {
@@ -387,72 +394,10 @@ async function loadQA(id) {
     const items=d.qa||[];
     box.innerHTML=items.length?'':'<div class="empty">Вопросов пока нет — задайте первый!</div>';
     items.forEach(r=>box.append(el('div',{class:'qa-item'},[el('div',{class:'qa-q'},['Q: ',r.q]),el('div',{class:'qa-a',html:mdToHtml(r.a)})])));
-  } catch { box.innerHTML='<div class="empty" style="color:#b91c1c">Ошибка.</div>'; }
+  } catch { box.innerHTML='<div class="empty" style="color:#ef4444">Ошибка.</div>'; }
 }
 
-function showTab(tab) {
-  ACTIVE_TAB = tab;
-  ['video','cards','exam','selftest','examfull'].forEach(t => {
-    const el = document.getElementById('tab-'+t);
-    if (el) el.classList.toggle('active', t===tab);
-  });
-  ['block-video','block-desc','block-ai','block-social'].forEach(id => document.getElementById(id).hidden=(tab!=='video'));
-  document.getElementById('block-cards').hidden = (tab!=='cards');
-  document.getElementById('block-exam').hidden  = (tab!=='exam');
-  document.getElementById('block-selftest').hidden = (tab!=='selftest');
-  document.getElementById('block-examfull').hidden = (tab!=='examfull');
-  document.getElementById('block-select-wrap').hidden = (tab==='examfull');
-  if (tab==='cards' && CURRENT) ensureCards(CURRENT.id);
-  if (tab==='exam'  && CURRENT) loadExamQ(CURRENT.id);
-  if (tab==='selftest' && CURRENT) resetST();
-  if (tab==='examfull') resetEF();
-}
-document.getElementById('tab-video').addEventListener('click', ()=>showTab('video'));
-document.getElementById('tab-cards').addEventListener('click', ()=>showTab('cards'));
-document.getElementById('tab-exam').addEventListener('click', ()=>showTab('exam'));
-document.getElementById('tab-selftest').addEventListener('click', ()=>showTab('selftest'));
-document.getElementById('tab-examfull').addEventListener('click', ()=>showTab('examfull'));
-document.getElementById('videoTabGeneral').addEventListener('click', ()=>switchVideoTab('general'));
-document.getElementById('videoTabPathogen').addEventListener('click', ()=>switchVideoTab('pathogen'));
-
-(function initSidebarToggle() {
-  const sidebar = document.getElementById('sidebar');
-  const toggle = document.getElementById('sidebarToggle');
-  const overlay = document.getElementById('sidebarOverlay');
-  const STORAGE_KEY = 'sidebarHidden';
-  function isMobile() { return window.matchMedia('(max-width: 768px)').matches; }
-  function getHidden() {
-    try {
-      const v = localStorage.getItem(STORAGE_KEY);
-      if (v !== null) return v === '1';
-      return isMobile();
-    } catch { return isMobile(); }
-  }
-  function setHidden(v) { try { localStorage.setItem(STORAGE_KEY, v ? '1' : '0'); } catch {} }
-  function apply() {
-    const hidden = getHidden();
-    const mobile = isMobile();
-    sidebar.classList.toggle('sidebar-hidden', hidden && !mobile);
-    sidebar.classList.toggle('sidebar-visible', !hidden && mobile);
-    if (overlay) {
-      overlay.classList.toggle('visible', mobile && !hidden);
-      overlay.setAttribute('aria-hidden', (mobile && !hidden) ? 'false' : 'true');
-    }
-  }
-  function toggleSidebar() {
-    const mobile = isMobile();
-    const hidden = getHidden();
-    setHidden(mobile ? !hidden : !hidden);
-    apply();
-  }
-  if (toggle) toggle.addEventListener('click', toggleSidebar);
-  if (overlay) overlay.addEventListener('click', () => { if (isMobile()) { setHidden(true); apply(); } });
-  sidebar.querySelectorAll('.sidebar-link, .sidebar-admin').forEach(el => {
-    el.addEventListener('click', () => { if (isMobile()) { setHidden(true); apply(); } });
-  });
-  window.addEventListener('resize', apply);
-  apply();
-})();
+// ─── Flashcards ───
 
 function setFlipped(v) {
   flipped=v; CE.box.classList.toggle('flipped',v);
@@ -486,28 +431,31 @@ async function generateCards(t) {
   const prompt = ['Сгенерируй РОВНО 12 карточек «вопрос–ответ» по теме ниже.',
     'Формат: чистый JSON-массив [{"q":"Вопрос?","a":"Ответ."}]. Без Markdown, без пояснений. Язык — русский.',
     'Тема: '+t.title,'Описание: '+(t.description||'').slice(0,3000)].join('\n');
-  const aiBase = getAIBase();
   try {
-    const r = await fetch(aiBase + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        topicId: t.id,
-        question: prompt,
-        topicTitle: t.title,
-        topicDesc: (t.description||'').replace(/<[^>]+>/g,'').slice(0,4000),
-        channel: 'cards'
-      })
+    const j = await aiPost('aiChat', {
+      topicId: t.id,
+      question: prompt,
+      topicTitle: t.title,
+      topicDesc: (t.description||'').replace(/<[^>]+>/g,'').slice(0,4000),
+      channel: 'cards'
     });
-    const j = await r.json();
+    if (j.error) throw new Error(j.error);
     const raw = String(j.answer||'').trim();
-    let arr=[]; const m=raw.match(/\[[\s\S]*\]/); if(m){try{arr=JSON.parse(m[0]);}catch{}}
-    if(!arr.length){const pp=[...raw.matchAll(/"q"\s*:\s*"([^"]+)"\s*,\s*"a"\s*:\s*"([^"]+)"/g)].map(x=>({q:x[1],a:x[2]}));if(pp.length)arr=pp;}
-    CARDS=arr.filter(x=>x&&x.q&&x.a).map(x=>({q:String(x.q),a:String(x.a)}));
-    if(!CARDS.length) throw new Error('empty');
+    let arr = [];
+    const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || raw.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      const str = (jsonMatch[1] || jsonMatch[0]).trim();
+      try { arr = JSON.parse(str); } catch { arr = JSON.parse(jsonMatch[0] || '[]'); }
+    }
+    if (!arr.length) {
+      const pp = [...raw.matchAll(/"q"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"a"\s*:\s*"((?:[^"\\]|\\.)*)"/g)].map(x => ({ q: x[1].replace(/\\"/g, '"'), a: x[2].replace(/\\"/g, '"') }));
+      if (pp.length) arr = pp;
+    }
+    CARDS = (Array.isArray(arr) ? arr : []).filter(x => x && (x.q || x.question) && (x.a || x.answer)).map(x => ({ q: String(x.q || x.question || ''), a: String(x.a || x.answer || '') }));
+    if (!CARDS.length) throw new Error('ИИ не вернул карточки. Попробуйте ещё раз.');
     opened.clear(); CE.congrats.classList.remove('show'); shuffleOrder(); setFlipped(false); renderCard();
     CE.status.textContent='Сгенерировано '+CARDS.length+' карточек'; persistCards(); persistOpened();
-  } catch { CE.status.textContent='Ошибка генерации. Запустите node server.js и попробуйте снова.'; }
+  } catch (e) { CE.status.textContent='Ошибка: ' + (e && e.message ? e.message : 'нет ключа. Добавьте GEMINI_API_KEY в config.js'); }
   finally { document.getElementById('genCards').disabled=false; CE.overlay.classList.remove('show'); }
 }
 function ensureCards(id) { if(cardsFor===id)return; cardsFor=id; if(!tryLoadLocal()){CARDS=[];renderCard();} }
@@ -522,6 +470,8 @@ document.addEventListener('keydown', e=>{
   if(e.key==='ArrowLeft'){if(!CARDS.length)return;ci=(ci-1+CARDS.length)%CARDS.length;setFlipped(false);renderCard();}
 });
 
+// ─── Exam Questions ───
+
 async function loadExamQ(id) {
   const box=document.getElementById('examList');
   box.innerHTML='<div class="empty">Загрузка…</div>';
@@ -532,8 +482,10 @@ async function loadExamQ(id) {
     if(!list.length){box.innerHTML='<div class="empty" style="padding:1.5rem;text-align:center">Вопросы не добавлены.</div>';return;}
     box.innerHTML='';
     list.forEach((item,i)=>box.append(el('div',{class:'exam-item'},[el('span',{class:'exam-num'},[String(i+1)]),el('p',{class:'exam-q'},[item.q])])));
-  } catch { box.innerHTML='<div class="empty" style="color:#b91c1c">Ошибка загрузки.</div>'; }
+  } catch { box.innerHTML='<div class="empty" style="color:#ef4444">Ошибка загрузки.</div>'; }
 }
+
+// ─── Self-test ───
 
 function stShow(panel) {
   ['st-idle','st-answering','st-grading','st-results'].forEach(id=>{
@@ -583,23 +535,17 @@ async function submitST() {
   const answers = ST.questions.map((q,i)=>({question:q.q, answer:ST.answers[i]||''}));
   let sid = localStorage.getItem('sid');
   if (!sid) { sid=uid(); localStorage.setItem('sid',sid); }
-  const aiBase = getAIBase();
   try {
-    const r = await fetch(aiBase + '/api/grade', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        topicId: CURRENT.id,
-        topicTitle: CURRENT.title,
-        topicDesc: (CURRENT.description||'').replace(/<[^>]+>/g,'').slice(0,4000),
-        studentId: sid,
-        answers
-      })
+    const j = await aiPost('aiGrade', {
+      topicId: CURRENT.id,
+      topicTitle: CURRENT.title,
+      topicDesc: (CURRENT.description||'').replace(/<[^>]+>/g,'').slice(0,4000),
+      studentId: sid,
+      answers
     });
-    const j = await r.json();
     if (j.ok) showSTResults(j.grades, j.avgGrade, answers);
-    else { stShow('st-idle'); document.getElementById('stIdleStatus').textContent='Ошибка: '+(j.error||'запустите node server.js'); }
-  } catch { stShow('st-idle'); document.getElementById('stIdleStatus').textContent='Ошибка сети. Запустите node server.js.'; }
+    else { stShow('st-idle'); document.getElementById('stIdleStatus').textContent='Ошибка: '+(j.error||''); }
+  } catch { stShow('st-idle'); document.getElementById('stIdleStatus').textContent='Ошибка сети.'; }
 }
 
 function showSTResults(grades, avgGrade, answers) {
@@ -621,6 +567,8 @@ function showSTResults(grades, avgGrade, answers) {
   });
 }
 document.getElementById('stRetry').addEventListener('click', ()=>resetST());
+
+// ─── Full Exam ───
 
 function efShow(panel) {
   ['ef-idle','ef-answering','ef-grading','ef-results'].forEach(id=>{
@@ -688,17 +636,11 @@ async function submitEF() {
   }));
   let sid = localStorage.getItem('sid');
   if (!sid) { sid=uid(); localStorage.setItem('sid',sid); }
-  const aiBase = getAIBase();
   try {
-    const r = await fetch(aiBase + '/api/grade', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ studentId: sid, answers })
-    });
-    const j = await r.json();
+    const j = await aiPost('aiGrade', { studentId: sid, answers });
     if (j.ok) showEFResults(j.grades, j.avgGrade, answers);
-    else { efShow('ef-idle'); document.getElementById('efIdleStatus').textContent='Ошибка: '+(j.error||'запустите node server.js'); }
-  } catch { efShow('ef-idle'); document.getElementById('efIdleStatus').textContent='Ошибка сети. Запустите node server.js.'; }
+    else { efShow('ef-idle'); document.getElementById('efIdleStatus').textContent='Ошибка: '+(j.error||''); }
+  } catch { efShow('ef-idle'); document.getElementById('efIdleStatus').textContent='Ошибка сети.'; }
 }
 
 function showEFResults(grades, avgGrade, answers) {
@@ -722,35 +664,28 @@ function showEFResults(grades, avgGrade, answers) {
 }
 document.getElementById('efRetry').addEventListener('click', ()=>resetEF());
 
-let ACTIVE_VIDEO_TAB = 'general';
-
-function switchVideoTab(tab) {
-  ACTIVE_VIDEO_TAB = tab;
-  document.querySelectorAll('.video-tab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.video === tab);
-  });
-  if (!CURRENT) return;
-  const embed = tab === 'pathogen' ? (CURRENT.embedPathogen || null) : (CURRENT.embed || null);
-  renderPlayer(embed);
-}
+// ─── Select Topic ───
 
 async function selectTopic(id) {
-  const t=TOPICS.find(x=>String(x.id)===String(id)); if(!t) return;
-  closeTopicMenu();
-  const sel = document.getElementById('topicSelect');
-  if (sel && String(sel.value) !== String(id)) {
-    sel.value = String(id);
-    renderTopicSelectUI();
-  }
-  CURRENT=t;
-  document.getElementById('topicTitle').textContent=t.title;
-  const hasGeneral = !!(t.embed && t.embed.src);
+  const t = TOPICS.find(x => String(x.id) === String(id));
+  if (!t) return;
+  CURRENT = t;
+
+  // Switch to detail view
+  switchView('detail');
+
+  // Set title
+  document.getElementById('topicTitle').textContent = t.title;
+
+  // Video tabs
+  const hasGeneral  = !!(t.embed && t.embed.src);
   const hasPathogen = !!(t.embedPathogen && t.embedPathogen.src);
-  const tabGeneral = document.getElementById('videoTabGeneral');
+  const tabGeneral  = document.getElementById('videoTabGeneral');
   const tabPathogen = document.getElementById('videoTabPathogen');
-  const tabsWrap = document.querySelector('.video-tabs');
-  const showTabs = hasGeneral && hasPathogen;
+  const tabsWrap    = document.querySelector('.video-tabs');
+  const showTabs    = hasGeneral && hasPathogen;
   tabsWrap.hidden = !showTabs;
+
   if (showTabs) {
     ACTIVE_VIDEO_TAB = 'general';
     tabGeneral.classList.add('active');
@@ -761,26 +696,29 @@ async function selectTopic(id) {
   } else {
     renderPlayer(t.embed);
   }
-  document.getElementById('block-video').hidden=false;
-  document.getElementById('desc').innerHTML=mdToHtml(t.description||'');
-  document.getElementById('block-desc').hidden=false;
-  document.getElementById('aiAnswer').hidden=true;
-  document.getElementById('aiStatus').textContent='';
-  document.getElementById('block-ai').hidden=false;
-  document.getElementById('block-social').hidden=false;
+
+  // Reset content tabs to description
+  showTab('desc');
+
+  // Load content
+  document.getElementById('desc').innerHTML = mdToHtml(t.description||'');
+  document.getElementById('aiAnswer').hidden = true;
+  document.getElementById('aiStatus').textContent = '';
+
   await loadComments(id);
   await refreshLikes(id);
   setLikeDone(!!localStorage.getItem('liked_'+id));
   await loadQA(id);
-  history.replaceState(null,'','#topic='+encodeURIComponent(id));
-  cardsFor=null; CARDS=[]; ci=0; setFlipped(false); opened.clear(); CE.congrats.classList.remove('show'); renderCard();
-  if(ACTIVE_TAB==='cards')  ensureCards(id);
-  if(ACTIVE_TAB==='exam')   loadExamQ(id);
-  if(ACTIVE_TAB==='selftest') resetST();
+
+  history.replaceState(null, '', '#topic='+encodeURIComponent(id));
+  cardsFor=null; CARDS=[]; ci=0; setFlipped(false); opened.clear();
+  CE.congrats.classList.remove('show'); renderCard();
 }
 
+// ─── Boot ───
+
 async function boot() {
-  USER_PREFS=loadPrefs();
+  USER_PREFS = loadPrefs();
   if (!USER_PREFS) {
     hideSplash(200);
     const ob = document.getElementById('onboarding');
@@ -788,16 +726,16 @@ async function boot() {
     return;
   }
   renderHeaderMeta();
+  switchView('topics');
   try {
     await loadTopics();
   } catch(e) {
     console.error('loadTopics:', e);
-    const sel = document.getElementById('block-select');
-    if (sel) sel.innerHTML = '<div class="empty" style="color:#DC2626;font-weight:600">Не удалось загрузить темы. Проверьте интернет и обновите страницу.</div>';
+    document.getElementById('topicList').innerHTML = '<div class="empty" style="color:#ef4444;font-weight:600;padding:1rem 0">Не удалось загрузить темы. Проверьте интернет и обновите страницу.</div>';
   }
   hideSplash();
 }
 
-showTab('video');
+showTab('desc');
 boot();
 })();
