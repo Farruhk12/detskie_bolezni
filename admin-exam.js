@@ -64,7 +64,13 @@ async function loadTopics() {
     TOPICS = d.topics || [];
     const sel = document.getElementById('adminExamTopic');
     sel.innerHTML = '<option value="">— Выберите тему —</option>';
-    TOPICS.forEach(t => sel.append(el('option', { value: t.id }, [t.title])));
+    TOPICS.forEach(t => {
+      const course = t.course ? t.course + ' курс' : '';
+      const faculty = t.faculty || '';
+      const meta = [course, faculty].filter(Boolean).join(' · ');
+      const label = meta ? `${t.title} (${meta})` : t.title;
+      sel.append(el('option', { value: t.id }, [label]));
+    });
     document.getElementById('adminExamSaveBtn').disabled = true;
   } catch (e) { console.error(e); }
 }
