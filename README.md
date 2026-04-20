@@ -25,6 +25,7 @@
 ### 2. Настройка ИИ в Google Apps Script
 В проекте GAS добавьте свойство:
 - **GEMINI_API_KEY** — ключ из [Google AI Studio](https://aistudio.google.com/apikey)
+- **GEMINI_MODEL** (опционально) — по умолчанию `gemma-3-27b-it` (выше лимит RPM на Free tier, чем у Flash)
 
 Проект → Свойства скрипта → Добавить свойство → `GEMINI_API_KEY` = ваш ключ
 
@@ -51,4 +52,5 @@
 Скопируйте `code.gs` в ваш проект GAS. Настройте:
 - **ADMIN_PASSWORD** — пароль админ-панели
 - **GEMINI_API_KEY** — ключ Gemini для ИИ (чат, карточки, оценка)
+- **GEMINI_MODEL** — опционально (см. выше)
 - URL развёртывания укажите в `config.js` (GAS_API)

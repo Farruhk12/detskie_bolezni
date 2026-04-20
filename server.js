@@ -10,13 +10,19 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
-const GEMINI_KEY = process.env.GEMINI_API_KEY || (() => {
+function readEnvFile_(name) {
   try {
-    const env = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
-    const m = env.match(/GEMINI_API_KEY=(.+)/);
-    return m ? m[1].trim() : '';
+    let env = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+    env = env.replace(/^\uFEFF/, '');
+    const m = env.match(new RegExp('^' + name + '=(.+)$', 'm'));
+    return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
   } catch { return ''; }
-})();
+}
+/** Сначала .env (чтобы смена ключа в файле работала), иначе переменные окружения — иначе старый GEMINI_API_KEY в Windows перекрывает .env */
+const GEMINI_KEY = readEnvFile_('GEMINI_API_KEY') || process.env.GEMINI_API_KEY || '';
+/** Модель Gemini API: на Free tier у Gemma 3 выше RPM, чем у Flash */
+const GEMINI_MODEL = readEnvFile_('GEMINI_MODEL') || process.env.GEMINI_MODEL || 'gemma-3-27b-it';
+const GEMINI_FALLBACK_MODEL = readEnvFile_('GEMINI_FALLBACK_MODEL') || process.env.GEMINI_FALLBACK_MODEL || 'gemini-2.5-flash';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -26,25 +32,40 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+async function callGeminiOnce_(model, fullPrompt, maxTokens, temp) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`;
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: fullPrompt }] }],
+    generationConfig: { temperature: temp, maxOutputTokens: maxTokens, thinkingConfig: { thinkingBudget: 0 } },
+  });
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000 * attempt));
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+    const text = await res.text();
+    if (res.ok) {
+      const j = JSON.parse(text);
+      const part = j.candidates?.[0]?.content?.parts?.[0];
+      return String(part?.text || '').trim();
+    }
+    lastErr = new Error('Gemini HTTP ' + res.status + ': ' + text.slice(0, 200));
+    if (res.status !== 429 && res.status !== 503) throw lastErr;
+  }
+  throw lastErr;
+}
+
 async function callAI(systemPrompt, userPrompt, maxTokens = 700, temp = 0.2) {
   if (!GEMINI_KEY) throw new Error('GEMINI_API_KEY не задан. Создайте .env с GEMINI_API_KEY=...');
   const fullPrompt = systemPrompt + '\n\n' + userPrompt;
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: fullPrompt }] }],
-      generationConfig: {
-        temperature: temp,
-        maxOutputTokens: maxTokens,
-      },
-    }),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error('Gemini HTTP ' + res.status + ': ' + text.slice(0, 200));
-  const j = JSON.parse(text);
-  const part = j.candidates?.[0]?.content?.parts?.[0];
-  return String(part?.text || '').trim();
+  try {
+    return await callGeminiOnce_(GEMINI_MODEL, fullPrompt, maxTokens, temp);
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (GEMINI_MODEL === GEMINI_FALLBACK_MODEL || !GEMINI_FALLBACK_MODEL) throw e;
+    if (!/429|503/.test(msg)) throw e;
+    console.warn('[Gemini] Повтор с моделью ' + GEMINI_FALLBACK_MODEL + ' (после 429/503 на ' + GEMINI_MODEL + ')');
+    return await callGeminiOnce_(GEMINI_FALLBACK_MODEL, fullPrompt, maxTokens, temp);
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -139,5 +160,11 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log('Сервер: http://localhost:' + PORT);
-      console.log('ИИ: ' + (GEMINI_KEY ? 'OK (Gemini)' : 'НЕТ КЛЮЧА — создайте .env с GEMINI_API_KEY=...'));
+  const src = readEnvFile_('GEMINI_API_KEY') ? 'из .env' : (process.env.GEMINI_API_KEY ? 'из переменной окружения' : '');
+  if (GEMINI_KEY) {
+    console.log('ИИ: OK — ключ ' + (src || 'задан') + ', модель ' + GEMINI_MODEL + ', запасная ' + GEMINI_FALLBACK_MODEL);
+    console.log('   Проверка: последние 4 символа ключа = …' + GEMINI_KEY.slice(-4) + ' (сверьте с AI Studio)');
+  } else {
+    console.log('ИИ: НЕТ КЛЮЧА — создайте .env с GEMINI_API_KEY=...');
+  }
 });

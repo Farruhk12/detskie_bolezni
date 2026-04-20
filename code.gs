@@ -271,11 +271,14 @@ function saveExamQuestions_(d) {
 
 /***** ИИ (Gemini) — работает без Node.js сервера *****/
 // Задать ключ: Проект → Свойства скрипта → GEMINI_API_KEY
+// Опционально: GEMINI_MODEL (напр. gemma-3-27b-it — выше RPM на Free tier, чем у Flash)
 function callGemini_(systemPrompt, userPrompt, maxTokens, temp) {
-  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const props = PropertiesService.getScriptProperties();
+  const key = props.getProperty('GEMINI_API_KEY');
   if (!key) throw new Error('GEMINI_API_KEY не задан. Добавьте в Свойства скрипта.');
+  const model = props.getProperty('GEMINI_MODEL') || 'gemma-3-27b-it';
   const fullPrompt = systemPrompt + '\n\n' + userPrompt;
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + encodeURIComponent(key);
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + encodeURIComponent(key);
   const res = UrlFetchApp.fetch(url, {
     method: 'post',
     contentType: 'application/json',

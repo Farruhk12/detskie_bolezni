@@ -20,6 +20,13 @@ async function aiPost(action, body) {
   }).then(r => r.json());
 }
 
+/** Подсказка при 429: ключ в config.js при http не используется — только .env + server.js или Vercel Env */
+function geminiQuotaHint(err) {
+  const t = String(err || '');
+  if (!/429|quota|TooManyRequests|превышен/i.test(t)) return t;
+  return t + ' — Ключ в config.js не используется для ИИ: нужен .env и перезапуск server.js, на Vercel — GEMINI_API_KEY в настройках. В консоли при старте сервера смотрите «последние 4 символа ключа». Если всё совпадает, попробуйте в .env: GEMINI_MODEL=gemini-2.5-flash';
+}
+
 function mdToHtml(md) {
   if (!md) return '';
   md = String(md).replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s]));
@@ -379,8 +386,8 @@ document.getElementById('aiForm').addEventListener('submit', async e => {
       fd.append('question',q); fd.append('answer',j.answer);
       try { await fetch(API,{method:'POST',body:fd}); } catch {}
       await loadQA(CURRENT.id);
-    } else aiSetBusy(false,'Ошибка: '+(j.error||'ИИ недоступен'));
-  } catch { aiSetBusy(false,'Ошибка сети. Проверьте GEMINI_API_KEY в Google Apps Script.'); }
+    } else aiSetBusy(false,'Ошибка: ' + geminiQuotaHint(j.error || 'ИИ недоступен'));
+  } catch { aiSetBusy(false,'Ошибка сети. ' + (USE_API ? 'Проверьте .env и server.js или Vercel.' : 'Проверьте GEMINI_API_KEY в Google Apps Script.')); }
 });
 
 async function loadQA(id) {
@@ -452,7 +459,7 @@ async function generateCards(t) {
     if (!CARDS.length) throw new Error('ИИ не вернул карточки. Попробуйте ещё раз.');
     opened.clear(); CE.congrats.classList.remove('show'); shuffleOrder(); setFlipped(false); renderCard();
     CE.status.textContent='Сгенерировано '+CARDS.length+' карточек'; persistCards(); persistOpened();
-  } catch (e) { CE.status.textContent='Ошибка: ' + (e && e.message ? e.message : 'нет ключа. Добавьте GEMINI_API_KEY в config.js'); }
+  } catch (e) { CE.status.textContent='Ошибка: ' + geminiQuotaHint(e && e.message ? e.message : 'нет ключа — .env + node server.js или Vercel GEMINI_API_KEY'); }
   finally { document.getElementById('genCards').disabled=false; CE.overlay.classList.remove('show'); }
 }
 function ensureCards(id) { if(cardsFor===id)return; cardsFor=id; if(!tryLoadLocal()){CARDS=[];renderCard();} }
@@ -541,7 +548,7 @@ async function submitST() {
       answers
     });
     if (j.ok) showSTResults(j.grades, j.avgGrade, answers);
-    else { stShow('st-idle'); document.getElementById('stIdleStatus').textContent='Ошибка: '+(j.error||''); }
+    else { stShow('st-idle'); document.getElementById('stIdleStatus').textContent='Ошибка: ' + geminiQuotaHint(j.error || ''); }
   } catch { stShow('st-idle'); document.getElementById('stIdleStatus').textContent='Ошибка сети.'; }
 }
 
@@ -636,7 +643,7 @@ async function submitEF() {
   try {
     const j = await aiPost('aiGrade', { studentId: sid, answers });
     if (j.ok) showEFResults(j.grades, j.avgGrade, answers);
-    else { efShow('ef-idle'); document.getElementById('efIdleStatus').textContent='Ошибка: '+(j.error||''); }
+    else { efShow('ef-idle'); document.getElementById('efIdleStatus').textContent='Ошибка: ' + geminiQuotaHint(j.error || ''); }
   } catch { efShow('ef-idle'); document.getElementById('efIdleStatus').textContent='Ошибка сети.'; }
 }
 
